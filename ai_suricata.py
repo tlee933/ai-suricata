@@ -19,20 +19,28 @@ from carbon_exporter import CarbonExporter, PeriodicCarbonExporter
 from thermal_monitor import ThermalMonitor
 from redis_client import RedisClient
 
+def getenv_stripped(key, default=''):
+    """Get environment variable and strip inline comments"""
+    value = os.getenv(key, default)
+    if isinstance(value, str) and '#' in value:
+        # Strip inline comments (everything after #)
+        value = value.split('#')[0].strip()
+    return value if value else default
+
 class AISuricata:
     def __init__(self, pfsense_host="192.168.1.1", pfsense_user="admin", dry_run=False, auto_block=False, prometheus_port=9102,
                  thermal_monitoring=True, thermal_poll_interval=30, thermal_warn_threshold=75.0, thermal_critical_threshold=85.0):
         print("[*] Initializing AI Suricata System...")
 
         # Initialize Redis client (optional, graceful degradation if unavailable)
-        redis_enabled = os.getenv('REDIS_ENABLED', 'true').lower() == 'true'
-        redis_host = os.getenv('REDIS_HOST', 'localhost')
-        redis_port = int(os.getenv('REDIS_PORT', '6379'))
-        redis_db = int(os.getenv('REDIS_DB', '0'))
-        redis_password = os.getenv('REDIS_PASSWORD', None)
-        redis_key_prefix = os.getenv('REDIS_KEY_PREFIX', 'ai_suricata')
-        redis_socket_timeout = int(os.getenv('REDIS_SOCKET_TIMEOUT', '2'))
-        redis_socket_keepalive = os.getenv('REDIS_SOCKET_KEEPALIVE', 'true').lower() == 'true'
+        redis_enabled = getenv_stripped('REDIS_ENABLED', 'true').lower() == 'true'
+        redis_host = getenv_stripped('REDIS_HOST', 'localhost')
+        redis_port = int(getenv_stripped('REDIS_PORT', '6379'))
+        redis_db = int(getenv_stripped('REDIS_DB', '0'))
+        redis_password = getenv_stripped('REDIS_PASSWORD', None)
+        redis_key_prefix = getenv_stripped('REDIS_KEY_PREFIX', 'ai_suricata')
+        redis_socket_timeout = int(getenv_stripped('REDIS_SOCKET_TIMEOUT', '2'))
+        redis_socket_keepalive = getenv_stripped('REDIS_SOCKET_KEEPALIVE', 'true').lower() == 'true'
 
         self.redis_client = None
         if redis_enabled:
@@ -60,16 +68,19 @@ class AISuricata:
             print("[*] Redis caching disabled (REDIS_ENABLED=false)")
 
         # Message queue configuration
-        use_message_queue = os.getenv('MESSAGE_QUEUE_ENABLED', 'false').lower() == 'true'
+        use_message_queue = getenv_stripped('MESSAGE_QUEUE_ENABLED', 'false').lower() == 'true'
+
+        # Always create SSH-based collector for training (needs historical data)
+        self.ssh_collector = SuricataAlertCollector(pfsense_host, pfsense_user)
 
         if use_message_queue and self.redis_client and self.redis_client.is_healthy():
             print("[+] Message queue mode enabled (Redis Streams)")
-            # Use stream consumer instead of SSH
+            # Use stream consumer for live monitoring
             from stream_consumer import RedisStreamConsumer, StreamAlertGenerator
 
-            consumer_group = os.getenv('MESSAGE_QUEUE_CONSUMER_GROUP', 'ai-processors')
-            consumer_name = os.getenv('MESSAGE_QUEUE_CONSUMER_NAME', 'ai-suricata-1')
-            use_consumer_groups = os.getenv('MESSAGE_QUEUE_USE_CONSUMER_GROUPS', 'true').lower() == 'true'
+            consumer_group = getenv_stripped('MESSAGE_QUEUE_CONSUMER_GROUP', 'ai-processors')
+            consumer_name = getenv_stripped('MESSAGE_QUEUE_CONSUMER_NAME', 'ai-suricata-1')
+            use_consumer_groups = getenv_stripped('MESSAGE_QUEUE_USE_CONSUMER_GROUPS', 'true').lower() == 'true'
 
             stream_consumer = RedisStreamConsumer(
                 self.redis_client,
@@ -83,11 +94,12 @@ class AISuricata:
             self.collector.pfsense_host = pfsense_host  # For compatibility
             self.collector.pfsense_user = pfsense_user
             print(f"[+] Stream consumer initialized: {consumer_group}/{consumer_name}")
+            print(f"[*] SSH collector available for training on historical data")
         else:
-            # Use traditional SSH-based collector
+            # Use traditional SSH-based collector for everything
             if use_message_queue:
                 print("[!] Message queue requested but Redis unavailable - falling back to SSH")
-            self.collector = SuricataAlertCollector(pfsense_host, pfsense_user)
+            self.collector = self.ssh_collector
 
         self.classifier = ThreatClassifier()
         self.responder = AutoResponder(pfsense_host, pfsense_user, dry_run=dry_run,
@@ -168,12 +180,13 @@ class AISuricata:
         feature_vectors = []
         alert_count = 0
 
-        for line in self.collector.tail_eve_log(follow=False, lines=num_events):
-            event = self.collector.parse_event(line)
+        # Always use SSH collector for training (needs historical data from pfSense logs)
+        for line in self.ssh_collector.tail_eve_log(follow=False, lines=num_events):
+            event = self.ssh_collector.parse_event(line)
             if not event or event.get("event_type") != "alert":
                 continue
 
-            alert_data = self.collector.process_alert(event)
+            alert_data = self.ssh_collector.process_alert(event)
             if alert_data:
                 # Extract features for ML training
                 features = self.classifier.extract_ml_features(alert_data)
@@ -192,7 +205,9 @@ class AISuricata:
         start_time = time.time()
 
         # Step 1: Collect and extract features
-        alert_data = self.collector.process_alert(event)
+        # Use ssh_collector for processing regardless of message queue mode
+        # (process_alert method exists on SuricataAlertCollector but not StreamAlertGenerator)
+        alert_data = self.ssh_collector.process_alert(event)
         if not alert_data:
             return None
 
@@ -311,18 +326,34 @@ class AISuricata:
         print("Press Ctrl+C to stop\n")
 
         try:
-            for line in self.collector.tail_eve_log(follow=True):
-                if not self.running:
-                    break
+            # Check if we're using message queue (StreamAlertGenerator) or SSH collector
+            if hasattr(self.collector, 'tail_eve_log'):
+                # SSH-based collector - iterate over log lines
+                for line in self.collector.tail_eve_log(follow=True):
+                    if not self.running:
+                        break
 
-                event = self.collector.parse_event(line)
-                if event and event.get("event_type") == "alert":
-                    # Skip checksum errors early (hardware offload false positives)
-                    signature = event.get("alert", {}).get("signature", "").lower()
-                    if "checksum" in signature or "invalid ack" in signature:
-                        continue
+                    event = self.collector.parse_event(line)
+                    if event and event.get("event_type") == "alert":
+                        # Skip checksum errors early (hardware offload false positives)
+                        signature = event.get("alert", {}).get("signature", "").lower()
+                        if "checksum" in signature or "invalid ack" in signature:
+                            continue
 
-                    self.process_alert(event)
+                        self.process_alert(event)
+            else:
+                # Message queue - StreamAlertGenerator is an iterator that yields events directly
+                for event in self.collector:
+                    if not self.running:
+                        break
+
+                    if event and event.get("event_type") == "alert":
+                        # Skip checksum errors early (hardware offload false positives)
+                        signature = event.get("alert", {}).get("signature", "").lower()
+                        if "checksum" in signature or "invalid ack" in signature:
+                            continue
+
+                        self.process_alert(event)
 
                 # Periodic cleanup
                 if self.processed_count % 1000 == 0 and self.processed_count > 0:
