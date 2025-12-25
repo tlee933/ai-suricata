@@ -34,6 +34,7 @@ AI-powered security system for pfSense using Suricata IDS with machine learning 
 ### Technical Documentation
 - **[Machine Learning Architecture](docs/MACHINE_LEARNING.md)** - Deep dive into ML models, feature engineering, and threat scoring
 - **[Development Roadmap](docs/ROADMAP.md)** - Future enhancements including supervised learning and advanced features
+- **[Message Queue Migration Plan](MESSAGE_QUEUE_PLAN.md)** - Replace SSH with Redis Streams for distributed, fault-tolerant architecture
 
 ### Key Features
 - **Unsupervised Learning**: IsolationForest anomaly detection (99.96% accuracy in production)
