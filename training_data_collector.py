@@ -218,7 +218,7 @@ class TrainingDataCollector:
         Performs atomic write using temporary file + rename
         """
         if not self.buffer:
-            return
+            return 0
 
         try:
             log_file = self.get_current_log_file()

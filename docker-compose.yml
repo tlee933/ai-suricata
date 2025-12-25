@@ -1,0 +1,305 @@
+version: '3.8'
+
+# AI Suricata - Complete Docker Stack
+# Works locally (docker-compose) or distributed (docker stack deploy)
+
+services:
+  # ============================================================================
+  # AI Suricata - Main Application
+  # ============================================================================
+  ai-suricata:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-suricata:latest
+    container_name: ai-suricata
+    restart: unless-stopped
+    ports:
+      - "8000:8000"  # Prometheus metrics
+    environment:
+      # Load from config.env
+      - REDIS_ENABLED=${REDIS_ENABLED:-true}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MESSAGE_QUEUE_ENABLED=${MESSAGE_QUEUE_ENABLED:-false}
+      - PFSENSE_HOST=${PFSENSE_HOST:-192.168.1.1}
+      - PFSENSE_USER=${PFSENSE_USER:-admin}
+    volumes:
+      # NAS storage (symlinks)
+      - /home/hashcat/mnt/backup-smb/ai-suricata-data/training-data:/app/training_data
+      - /home/hashcat/mnt/backup-smb/ai-suricata-data/models:/app/models
+      # Local state and logs
+      - ai-suricata-state:/app/state
+      - ai-suricata-logs:/app/logs
+      # SSH keys for pfSense access
+      - ${HOME}/.ssh:/root/.ssh:ro
+      # ROCm for GPU access (future)
+      - /opt/rocm:/opt/rocm:ro
+    depends_on:
+      - redis
+    networks:
+      - ai-suricata-net
+    # Swarm deployment configuration (ignored by docker-compose)
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == processing  # Run on nodes with GPU
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          memory: 1G
+
+  # ============================================================================
+  # Redis - Caching Layer
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ai-suricata-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --save 60 1 --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - ai-suricata-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == cache
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          memory: 512M
+
+  # ============================================================================
+  # Redis Exporter - Metrics
+  # ============================================================================
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: redis-exporter
+    restart: unless-stopped
+    ports:
+      - "9121:9121"
+    environment:
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - redis
+    networks:
+      - ai-suricata-net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == cache
+      restart_policy:
+        condition: on-failure
+
+  # ============================================================================
+  # Prometheus - Metrics Database
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    volumes:
+      - /home/hashcat/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /home/hashcat/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - ai-suricata-net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == monitoring
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 512M
+        limits:
+          memory: 2G
+
+  # ============================================================================
+  # Grafana - Dashboards
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=gfx1031rocks
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - /home/hashcat/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - /home/hashcat/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - ai-suricata-net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == monitoring
+      restart_policy:
+        condition: on-failure
+
+  # ============================================================================
+  # Node Exporter - System Metrics
+  # ============================================================================
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host:ro
+    network_mode: host
+    # Note: network_mode: host not compatible with Swarm, will need adjustment for distributed
+
+  # ============================================================================
+  # cAdvisor - Container Metrics
+  # ============================================================================
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "8081:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    networks:
+      - ai-suricata-net
+    deploy:
+      mode: global  # Run on all nodes
+      restart_policy:
+        condition: on-failure
+
+  # ============================================================================
+  # AMD GPU Exporter - GPU Metrics
+  # ============================================================================
+  amd-gpu-exporter:
+    build:
+      context: /home/hashcat/monitoring/amd-gpu-exporter
+      dockerfile: Dockerfile
+    image: amd-gpu-exporter:latest
+    container_name: amd-gpu-exporter
+    restart: unless-stopped
+    ports:
+      - "9101:9101"
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    group_add:
+      - "39"   # video group
+      - "105"  # render group
+    volumes:
+      - /opt/rocm:/opt/rocm:ro
+    environment:
+      - ROCM_PATH=/opt/rocm
+    networks:
+      - ai-suricata-net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.gpu == amd
+      restart_policy:
+        condition: on-failure
+
+  # ============================================================================
+  # Alertmanager - Alert Management
+  # ============================================================================
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - /home/hashcat/monitoring/prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - ai-suricata-net
+    deploy:
+      placement:
+        constraints:
+          - node.labels.role == monitoring
+      restart_policy:
+        condition: on-failure
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  ai-suricata-net:
+    driver: bridge
+    # For Swarm, use overlay:
+    # driver: overlay
+    # attachable: true
+
+# ============================================================================
+# Volumes
+# ============================================================================
+volumes:
+  # AI Suricata data
+  ai-suricata-state:
+    driver: local
+  ai-suricata-logs:
+    driver: local
+  
+  # Redis data
+  redis-data:
+    driver: local
+  
+  # Monitoring data
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  alertmanager-data:
+    driver: local
