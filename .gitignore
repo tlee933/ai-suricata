@@ -1,0 +1,50 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Data directories (symlinks to NAS)
+training_data/
+models/
+
+# Local backups
+*.local-backup/
+training_data.local-backup/
+models.local-backup/
+
+# State files
+state/
+*.json
+
+# Log files
+logs/
+*.log
+*.jsonl
+
+# Model files (stored on NAS)
+*.pkl
+
+# Temporary files
+*.tmp
+*.swp
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# SELinux policy compilation
+*.pp
+*.te
+*.te.compiled
+
+# Grafana dashboards (exported manually)
+grafana_dashboard.json

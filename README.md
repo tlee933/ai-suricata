@@ -31,10 +31,23 @@ AI-powered security system for pfSense using Suricata IDS with machine learning 
 
 ## Documentation
 
-### Technical Documentation
+### 📖 Implementation Guides
+- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - Complete system overview with architecture, performance metrics, and operational status
+- **[Quick Start Guide](QUICKSTART.md)** - Get AI Suricata running in 15 minutes
+- **[Monitoring Setup](MONITORING.md)** - Prometheus, Grafana, and dashboard configuration
+
+### 🔧 Technical Documentation
 - **[Machine Learning Architecture](docs/MACHINE_LEARNING.md)** - Deep dive into ML models, feature engineering, and threat scoring
 - **[Development Roadmap](docs/ROADMAP.md)** - Future enhancements including supervised learning and advanced features
-- **[Message Queue Migration Plan](MESSAGE_QUEUE_PLAN.md)** - Replace SSH with Redis Streams for distributed, fault-tolerant architecture
+
+### ⚡ Performance & Optimization
+- **[Redis Implementation](REDIS_IMPLEMENTATION.md)** - Complete Redis integration guide with performance analysis
+- **[Redis Summary](REDIS_SUMMARY.md)** - Quick reference for Redis caching features
+- **[NAS Storage Implementation](NAS_STORAGE_IMPLEMENTATION.md)** - Network storage integration for training data and models
+
+### 📊 Architecture Decisions
+- **[Network Storage Proposal](NETWORK_STORAGE_PROPOSAL.md)** - SMB/NFS/iSCSI protocol comparison and recommendations
+- **[NFS vs iSCSI Deep Dive](NFS_VS_ISCSI.md)** - Detailed technical analysis for storage protocol selection
 
 ### Key Features
 - **Unsupervised Learning**: IsolationForest anomaly detection (99.96% accuracy in production)
@@ -146,22 +159,29 @@ Logs ML classification decisions for building supervised learning datasets.
 - Tracks all 16 feature dimensions + classification result
 
 ### 8. **redis_client.py**
-Redis caching layer for distributed state and performance.
+Redis caching layer for distributed state and performance optimization.
 
 **Features:**
-- Blocked IP persistence with auto-expiration
-- IP behavioral profile caching
-- Metrics caching for performance
-- Top IPs tracking (sorted sets)
-- Rate limiting counters
-- Graceful fallback if unavailable
+- **Blocked IP persistence** with 24h auto-expiration
+- **IP behavioral profile caching** for fast lookups (99.98% hit rate)
+- **Metrics caching** reduces CPU by ~20% (disabled message queue overhead)
+- **Top IPs tracking** via Redis sorted sets
+- **Rate limiting counters** for distributed rate limiting
+- **Graceful fallback** to in-memory if Redis unavailable
 
 **Redis Integration:**
 - Enabled by default (REDIS_ENABLED=true)
+- Docker container deployment (Redis 7 Alpine)
 - Auto-reconnection on connection loss
-- Thread-safe operations
-- TTL-based auto-expiration
-- Health monitoring
+- Thread-safe operations with connection pooling
+- TTL-based auto-expiration (no manual cleanup needed)
+- Health monitoring via Prometheus exporter
+
+**Performance:**
+- CPU: 7.7% (caching only, message queue disabled)
+- Operations: ~2,400 ops/sec
+- Cache hit rate: 99.98%
+- Memory: Bounded with TTL-based eviction
 
 ### 9. **ai_suricata.py**
 Main integrated system combining all components.
@@ -300,16 +320,38 @@ Press Ctrl+C to display summary statistics.
 
 ```
 ai_suricata/
-├── ai_suricata.py          # Main integrated system
-├── alert_collector.py      # Log collection & preprocessing
-├── ml_classifier.py        # ML threat classification
-├── auto_responder.py       # Automated response system
-├── models/                 # Saved ML models
+├── ai_suricata.py                    # Main integrated system
+├── alert_collector.py                # Log collection & preprocessing
+├── ml_classifier.py                  # ML threat classification
+├── auto_responder.py                 # Automated response system
+├── redis_client.py                   # Redis caching layer
+├── prometheus_exporter.py            # Prometheus metrics exporter
+├── carbon_exporter.py                # Grafana Carbon/Graphite exporter
+├── state_manager.py                  # Persistent state management
+├── training_data_collector.py        # Training dataset builder
+├── thermal_monitor.py                # GPU thermal monitoring
+├── manage.sh                         # Service management script
+├── config.env                        # Configuration file
+├── training_data/                    # Training datasets (→ NAS symlink)
+│   └── decisions.*.jsonl
+├── models/                           # Saved ML models (→ NAS symlink)
 │   └── threat_classifier.pkl
-├── logs/                   # Alert logs
+├── state/                            # Persistent state
+│   └── metrics_state.json
+├── logs/                             # Alert logs
 │   └── ai_alerts.jsonl
-└── README.md              # This file
+└── docs/                             # Documentation
+    ├── IMPLEMENTATION_SUMMARY.md     # Complete system overview
+    ├── REDIS_IMPLEMENTATION.md       # Redis integration guide
+    ├── NAS_STORAGE_IMPLEMENTATION.md # Network storage guide
+    └── ...
 ```
+
+**NAS Storage Integration:**
+- Training data and models stored on NAS (192.168.1.7) via SMB mount
+- Symlinks provide transparent access: `training_data/` → `/mnt/backup-smb/ai-suricata-data/training-data/`
+- Benefits: Centralized backup, unlimited growth, multi-machine access
+- See [NAS_STORAGE_IMPLEMENTATION.md](NAS_STORAGE_IMPLEMENTATION.md) for details
 
 ## Integration with pfSense
 
