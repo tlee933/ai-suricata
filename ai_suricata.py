@@ -59,9 +59,40 @@ class AISuricata:
         else:
             print("[*] Redis caching disabled (REDIS_ENABLED=false)")
 
-        self.collector = SuricataAlertCollector(pfsense_host, pfsense_user)
+        # Message queue configuration
+        use_message_queue = os.getenv('MESSAGE_QUEUE_ENABLED', 'false').lower() == 'true'
+
+        if use_message_queue and self.redis_client and self.redis_client.is_healthy():
+            print("[+] Message queue mode enabled (Redis Streams)")
+            # Use stream consumer instead of SSH
+            from stream_consumer import RedisStreamConsumer, StreamAlertGenerator
+
+            consumer_group = os.getenv('MESSAGE_QUEUE_CONSUMER_GROUP', 'ai-processors')
+            consumer_name = os.getenv('MESSAGE_QUEUE_CONSUMER_NAME', 'ai-suricata-1')
+            use_consumer_groups = os.getenv('MESSAGE_QUEUE_USE_CONSUMER_GROUPS', 'true').lower() == 'true'
+
+            stream_consumer = RedisStreamConsumer(
+                self.redis_client,
+                stream_name=f"{redis_key_prefix}:alerts:stream",
+                group_name=consumer_group,
+                consumer_name=consumer_name,
+                create_group=use_consumer_groups
+            )
+
+            self.collector = StreamAlertGenerator(stream_consumer, use_consumer_group=use_consumer_groups)
+            self.collector.pfsense_host = pfsense_host  # For compatibility
+            self.collector.pfsense_user = pfsense_user
+            print(f"[+] Stream consumer initialized: {consumer_group}/{consumer_name}")
+        else:
+            # Use traditional SSH-based collector
+            if use_message_queue:
+                print("[!] Message queue requested but Redis unavailable - falling back to SSH")
+            self.collector = SuricataAlertCollector(pfsense_host, pfsense_user)
+
         self.classifier = ThreatClassifier()
-        self.responder = AutoResponder(pfsense_host, pfsense_user, dry_run=dry_run, redis_client=self.redis_client)
+        self.responder = AutoResponder(pfsense_host, pfsense_user, dry_run=dry_run,
+                                       redis_client=self.redis_client,
+                                       use_message_queue=use_message_queue)
 
         self.auto_block = auto_block
         self.running = True

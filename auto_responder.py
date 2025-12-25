@@ -11,11 +11,12 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 class AutoResponder:
-    def __init__(self, pfsense_host="192.168.1.1", pfsense_user="admin", dry_run=False, redis_client=None):
+    def __init__(self, pfsense_host="192.168.1.1", pfsense_user="admin", dry_run=False, redis_client=None, use_message_queue=False):
         self.pfsense_host = pfsense_host
         self.pfsense_user = pfsense_user
         self.dry_run = dry_run  # If True, only log actions without executing
         self.redis_client = redis_client  # Optional Redis client for persistence
+        self.use_message_queue = use_message_queue  # Use Redis Streams instead of SSH
 
         # Track blocked IPs
         self.blocked_ips = {}  # {ip: {"timestamp": ..., "reason": ..., "threat_score": ...}}
@@ -30,9 +31,95 @@ class AutoResponder:
             "logs": 0
         }
 
+        # Message queue stream names
+        if self.use_message_queue and self.redis_client:
+            key_prefix = self.redis_client.key_prefix
+            self.blocks_stream = f"{key_prefix}:blocks:stream"
+            self.acks_stream = f"{key_prefix}:acks:stream"
+            print(f"[+] Message queue mode enabled: {self.blocks_stream}")
+        else:
+            self.blocks_stream = None
+            self.acks_stream = None
+
         # Restore blocked IPs from Redis on startup
         if self.redis_client and self.redis_client.enabled:
             self._restore_blocks_from_redis()
+
+    def _block_via_message_queue(self, ip, reason, threat_score):
+        """
+        Block IP via Redis Streams message queue.
+        Publishes command to pfSense agent instead of SSH.
+        """
+        import uuid
+
+        try:
+            command_id = str(uuid.uuid4())
+
+            # Publish block command to stream
+            msg_id = self.redis_client.redis.xadd(self.blocks_stream, {
+                'action': 'block',
+                'ip_address': ip,
+                'reason': reason,
+                'threat_score': str(threat_score),
+                'command_id': command_id,
+                'timestamp': datetime.now().isoformat()
+            }, maxlen=10000)
+
+            print(f"    [+] Published block command to message queue: {msg_id}")
+
+            # Update local state
+            timestamp = datetime.now()
+            self.blocked_ips[ip] = {
+                "timestamp": timestamp,
+                "reason": reason,
+                "threat_score": threat_score,
+                "command_id": command_id,
+                "via_message_queue": True
+            }
+            self.stats["blocks"] += 1
+
+            # Also persist to Redis cache
+            if self.redis_client:
+                self.redis_client.set_blocked_ip(ip, reason, threat_score, ttl=86400)
+
+            return {"success": True, "message": "Block command published", "command_id": command_id}
+
+        except Exception as e:
+            print(f"    [!] Failed to publish block command: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _unblock_via_message_queue(self, ip):
+        """
+        Unblock IP via Redis Streams message queue.
+        """
+        import uuid
+
+        try:
+            command_id = str(uuid.uuid4())
+
+            # Publish unblock command
+            msg_id = self.redis_client.redis.xadd(self.blocks_stream, {
+                'action': 'unblock',
+                'ip_address': ip,
+                'command_id': command_id,
+                'timestamp': datetime.now().isoformat()
+            }, maxlen=10000)
+
+            print(f"    [+] Published unblock command to message queue: {msg_id}")
+
+            # Update local state
+            if ip in self.blocked_ips:
+                del self.blocked_ips[ip]
+
+            # Remove from Redis cache
+            if self.redis_client:
+                self.redis_client.unblock_ip(ip)
+
+            return {"success": True, "message": "Unblock command published", "command_id": command_id}
+
+        except Exception as e:
+            print(f"    [!] Failed to publish unblock command: {e}")
+            return {"success": False, "error": str(e)}
 
     def _restore_blocks_from_redis(self):
         """Restore blocked IPs from Redis on startup"""
@@ -75,12 +162,16 @@ class AutoResponder:
             return {"success": False, "output": "", "error": "Command timed out"}
 
     def block_ip(self, ip, reason, threat_score):
-        """Block an IP address using pfSense firewall"""
+        """Block an IP address using pfSense firewall or message queue"""
         if ip in self.blocked_ips:
             print(f"[*] IP {ip} already blocked")
             return {"success": True, "message": "Already blocked"}
 
         print(f"[!] BLOCKING IP: {ip} - Reason: {reason} - Threat Score: {threat_score:.2f}")
+
+        # Use message queue if enabled
+        if self.use_message_queue and self.redis_client and self.redis_client.enabled:
+            return self._block_via_message_queue(ip, reason, threat_score)
 
         if self.dry_run:
             print(f"    [DRY RUN] Would block {ip}")
@@ -237,6 +328,10 @@ echo \"Blocked {ip}\\\\n\";
             return {"success": False, "message": "IP not blocked"}
 
         print(f"[*] Unblocking {ip}")
+
+        # Use message queue if enabled
+        if self.use_message_queue and self.redis_client and self.redis_client.enabled:
+            return self._unblock_via_message_queue(ip)
 
         if self.dry_run:
             del self.blocked_ips[ip]
