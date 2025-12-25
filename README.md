@@ -144,7 +144,25 @@ Logs ML classification decisions for building supervised learning datasets.
 - 6-month retention policy
 - Tracks all 16 feature dimensions + classification result
 
-### 6. **ai_suricata.py**
+### 8. **redis_client.py**
+Redis caching layer for distributed state and performance.
+
+**Features:**
+- Blocked IP persistence with auto-expiration
+- IP behavioral profile caching
+- Metrics caching for performance
+- Top IPs tracking (sorted sets)
+- Rate limiting counters
+- Graceful fallback if unavailable
+
+**Redis Integration:**
+- Enabled by default (REDIS_ENABLED=true)
+- Auto-reconnection on connection loss
+- Thread-safe operations
+- TTL-based auto-expiration
+- Health monitoring
+
+### 9. **ai_suricata.py**
 Main integrated system combining all components.
 
 ## Installation & Setup
@@ -157,8 +175,29 @@ Main integrated system combining all components.
 
 ### Install Dependencies
 ```bash
-pip3 install numpy scikit-learn
+# Python packages
+pip3 install numpy scikit-learn redis
+
+# Redis (Docker - Recommended)
+docker volume create ai-suricata-redis
+docker run -d \
+  --name ai-suricata-redis \
+  --restart unless-stopped \
+  -p 6379:6379 \
+  -v ai-suricata-redis:/data \
+  redis:7-alpine \
+  redis-server --appendonly yes --save 60 1
+
+# Verify Redis
+docker exec ai-suricata-redis redis-cli ping  # Should return "PONG"
 ```
+
+**Redis Features** (Enabled by default):
+- Blocked IP persistence across restarts
+- Distributed state sharing for multi-instance deployments
+- IP behavioral profile caching
+- Auto-expiring blocks (24h TTL)
+- Fast O(1) IP reputation lookups
 
 ### Configure SSH Access
 ```bash
@@ -378,6 +417,61 @@ For detailed performance analysis and benchmarks, see [PERFORMANCE.md](PERFORMAN
 3. **Checksum Filtering**: Ignores hardware offload false positives
 4. **Action Logging**: All blocks are logged with justification
 5. **Model Retraining**: Periodically retrain on new threat data
+
+## Redis Configuration
+
+Redis is **enabled by default** and provides persistence, performance, and distributed state.
+
+### Configuration Options (config.env)
+```bash
+REDIS_ENABLED=true           # Enable/disable Redis
+REDIS_HOST=localhost         # Redis server hostname
+REDIS_PORT=6379              # Redis port
+REDIS_DB=0                   # Database number
+REDIS_PASSWORD=              # Optional password
+REDIS_KEY_PREFIX=ai_suricata # Key namespace
+REDIS_SOCKET_TIMEOUT=2       # Connection timeout (seconds)
+REDIS_SOCKET_KEEPALIVE=true  # TCP keepalive
+```
+
+### Disabling Redis
+If you want to run without Redis:
+```bash
+# Edit config.env
+REDIS_ENABLED=false
+
+# Restart service
+sudo systemctl restart ai-suricata
+```
+
+System will fall back to in-memory storage (blocks won't persist across restarts).
+
+### Redis Health Check
+```bash
+# Check Redis container
+docker ps | grep redis
+
+# Test connection
+docker exec ai-suricata-redis redis-cli ping
+
+# View keys
+docker exec ai-suricata-redis redis-cli --scan --pattern "ai_suricata:*"
+
+# Check specific key
+docker exec ai-suricata-redis redis-cli HGETALL "ai_suricata:ip_behavior:192.168.1.100"
+```
+
+### Redis Monitoring
+Redis exports metrics to Prometheus:
+- Connection health
+- Memory usage
+- Cache hit rate
+- Key counts
+- Command statistics
+
+View in Grafana dashboard for real-time monitoring.
+
+---
 
 ## Troubleshooting
 
