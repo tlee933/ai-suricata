@@ -21,6 +21,8 @@ models.local-backup/
 # State files
 state/
 *.json
+# Exception: Allow Grafana dashboard configs
+!grafana/dashboards/*.json
 
 # Log files
 logs/
@@ -46,5 +48,11 @@ logs/
 *.te
 *.te.compiled
 
-# Grafana dashboards (exported manually)
-grafana_dashboard.json
+# Grafana/Prometheus runtime data (exclude data, allow configs)
+grafana/data/
+grafana/plugins/
+grafana/*.db
+prometheus/data/
+prometheus/*.yml
+# Keep dashboard JSON configs in version control
+# grafana/dashboards/*.json - allowed above

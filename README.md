@@ -2,6 +2,8 @@
 
 AI-powered security system for pfSense using Suricata IDS with machine learning classification and automated response.
 
+> **Note:** This project supersedes and consolidates the previous `neural-firewall-guardian` repository. All features have been merged and enhanced here with production-grade improvements including Redis caching, Docker deployment, NAS storage integration, and comprehensive monitoring.
+
 ## Architecture
 
 ```
